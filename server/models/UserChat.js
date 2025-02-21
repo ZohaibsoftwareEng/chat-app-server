@@ -1,132 +1,129 @@
-const mongoose = require('mongoose');
+  const mongoose = require('mongoose');
 
-// Message Schema
-const MessageSchema = new mongoose.Schema({
-  content: {
-    type: String,
-    required: true
-  },
-  sender: {
-    type: String,
-    required: true
-  },
-  receiver: {
-    type: String,
-    required: true
-  },
-  roomId: {
-    type: String,
-    required: true
-  },
-  timestamp: {
-    type: Number,
-    default: () => Date.now()
-  },
-  read: {
-    type: Boolean,
-    default: false
-  }
-});
-
-// Main UserChat Schema
-const UserChatSchema = new mongoose.Schema({
-  userId: {
-    type: String,
-    required: true,
-    unique: true // Ensure only one document per user
-  },
-  conversations: {
-    type: Map,
-    of: {
-      messages: [MessageSchema],
-      lastMessage: MessageSchema,
-      unreadCount: {
-        type: Number,
-        default: 0
-      }
+  // Message Schema
+  const MessageSchema = new mongoose.Schema({
+    content: {
+      type: String,
+      required: true
     },
-    default: new Map()
-  }
-}, {
-  timestamps: true
-});
+    sender: {
+      type: String,
+      required: true
+    },
+    receiver: {
+      type: String,
+      required: true
+    },
+    timestamp: {
+      type: Number,
+      default: () => Date.now()
+    },
+    read: {
+      type: Boolean,
+      default: false
+    }
+  });
 
-// Indexes
-UserChatSchema.index({ userId: 1 });
+  // Main UserChat Schema
+  const UserChatSchema = new mongoose.Schema({
+    roomId: {
+      type: String,
+      required: true,
+      unique: true // Ensures one document per conversation
+    },
+    participants: [{
+      type: String,
+      required: true
+    }],
+    messages: [MessageSchema],
+    lastMessage: {
+      type: MessageSchema,
+      default: null
+    },
+    unreadCount: {
+      type: Map,
+      of: Number,
+      default: () => new Map()
+    }
+  }, {
+    timestamps: true
+  });
 
-// Static Methods
-UserChatSchema.statics.addMessage = async function(messageData) {
-  const { sender, receiver, content, roomId, timestamp } = messageData;
-  
-  const message = {
-    content,
-    sender,
-    receiver,
-    roomId,
-    timestamp,
-    read: false
+  // Indexes
+  UserChatSchema.index({ roomId: 1 });
+  UserChatSchema.index({ participants: 1 });
+
+  // Static Methods
+  UserChatSchema.statics.addMessage = async function(messageData) {
+    const { sender, receiver, content, roomId, timestamp } = messageData;
+    
+    const message = {
+      content,
+      sender,
+      receiver,
+      timestamp,
+      read: false
+    };
+
+    // Update or create conversation
+    const chat = await this.findOneAndUpdate(
+      { roomId },
+      {
+        $push: { messages: message },
+        $set: { lastMessage: message },
+        $setOnInsert: { 
+          participants: [sender, receiver]
+        },
+        $inc: {
+          [`unreadCount.${receiver}`]: 1
+        }
+      },
+      { 
+        upsert: true,
+        new: true,
+        setDefaultsOnInsert: true
+      }
+    );
+
+    return chat;
   };
 
-  // Update or create sender's document and conversation
-  await this.findOneAndUpdate(
-    { userId: sender },
-    {
-      $push: {
-        [`conversations.${receiver}.messages`]: message
+  UserChatSchema.statics.markMessagesAsRead = async function(roomId, userId) {
+    return this.findOneAndUpdate(
+      { roomId },
+      {
+        $set: {
+          'messages.$[msg].read': true,
+          [`unreadCount.${userId}`]: 0
+        }
       },
-      $set: {
-        [`conversations.${receiver}.lastMessage`]: message
+      {
+        arrayFilters: [{ 'msg.receiver': userId, 'msg.read': false }],
+        new: true
       }
-    },
-    { 
-      upsert: true,
-      new: true,
-      setDefaultsOnInsert: true
-    }
-  );
+    );
+  };
 
-  // Update or create receiver's document and conversation
-  await this.findOneAndUpdate(
-    { userId: receiver },
-    {
-      $push: {
-        [`conversations.${sender}.messages`]: message
-      },
-      $set: {
-        [`conversations.${sender}.lastMessage`]: message
-      },
-      $inc: {
-        [`conversations.${sender}.unreadCount`]: 1
+  // Get conversations for a user
+  UserChatSchema.statics.getUserConversations = async function(userId) {
+    return this.find(
+      { participants: userId },
+      {
+        roomId: 1,
+        participants: 1,
+        lastMessage: 1,
+        unreadCount: 1
       }
-    },
-    { 
-      upsert: true,
-      new: true,
-      setDefaultsOnInsert: true
-    }
-  );
-};
+    ).sort({ 'lastMessage.timestamp': -1 });
+  };
 
-UserChatSchema.statics.markConversationAsRead = async function(userId, otherUserId) {
-  return this.findOneAndUpdate(
-    { userId },
-    {
-      $set: {
-        [`conversations.${otherUserId}.unreadCount`]: 0,
-        [`conversations.${otherUserId}.messages.$[].read`]: true
-      }
-    },
-    { new: true }
-  );
-};
+  // Get messages for a specific room
+  UserChatSchema.statics.getRoomMessages = async function(roomId, limit = 50, skip = 0) {
+    const chat = await this.findOne(
+      { roomId },
+      { messages: { $slice: [skip, limit] } }
+    );
+    return chat ? chat.messages : [];
+  };
 
-// Method to get messages between two users
-UserChatSchema.statics.getConversation = async function(userId, otherUserId) {
-  const userChat = await this.findOne({ userId });
-  if (!userChat || !userChat.conversations.get(otherUserId)) {
-    return [];
-  }
-  return userChat.conversations.get(otherUserId).messages;
-};
-
-module.exports = mongoose.model('UserChat', UserChatSchema);
+  module.exports = mongoose.model('UserChat', UserChatSchema);

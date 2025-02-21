@@ -179,8 +179,6 @@ io.on("connection", async (socket) => {
   // Simplified message handler to debug the issue
   socket.on("message", async (message) => {
     try {
-      console.log('Received message:', message);
-      
       if (!message || !message.from || !message.roomId || !message.message) {
         throw new Error('Invalid message format');
       }
@@ -190,36 +188,41 @@ io.on("connection", async (socket) => {
         message: sanitise(message.message)
       };
       
-      // Store in Redis
-      await sadd("online_users", sanitizedMessage.from);
-      const messageString = JSON.stringify(sanitizedMessage);
-      const roomKey = `room:${sanitizedMessage.roomId}`;
-  
-      // Check if it's a private room
       const isPrivate = sanitizedMessage.roomId.includes(':');
+      const roomKey = `room:${sanitizedMessage.roomId}`;
       const roomHasMessages = await exists(roomKey);
-       
-      console.log('is private',isPrivate)
   
-      // Store in Redis
-      await zadd(roomKey, "" + sanitizedMessage.date, messageString);
+      // Store in Redis for real-time features
+      await sadd("online_users", sanitizedMessage.from);
+      await zadd(roomKey, "" + sanitizedMessage.date, JSON.stringify(sanitizedMessage));
   
       if (isPrivate) {
         const [user1, user2] = sanitizedMessage.roomId.split(':');
         const senderId = sanitizedMessage.from;
         const receiverId = senderId === user1 ? user2 : user1;
-        
-        const messageData = {
+  
+        // Store in MongoDB
+        await UserChat.addMessage({
           content: sanitizedMessage.message,
           sender: senderId,
           receiver: receiverId,
           roomId: sanitizedMessage.roomId,
           timestamp: sanitizedMessage.date
-        };
-        
-        await UserChat.addMessage(messageData);
+        });
+  
+        if (!roomHasMessages) {
+          const roomMsg = {
+            id: sanitizedMessage.roomId,
+            names: [
+              await hmget(`user:${user1}`, "username"),
+              await hmget(`user:${user2}`, "username"),
+            ],
+          };
+          publish("show.room", roomMsg);
+          socket.broadcast.emit(`show.room`, roomMsg);
+        }
       } else {
-        // Group chat logic remains the same
+  
         await GroupChat.findOneAndUpdate(
           { roomId: sanitizedMessage.roomId },
           {
@@ -236,16 +239,12 @@ io.on("connection", async (socket) => {
         );
       }
   
-      // Emit message to room
       publish("message", sanitizedMessage);
       io.to(roomKey).emit("message", sanitizedMessage);
   
     } catch (error) {
       console.error('Error handling message:', error);
-      socket.emit('message.error', {
-        error: 'Failed to process message',
-        details: error.message
-      });
+      socket.emit('message.error', { error: 'Failed to process message' });
     }
   });
   socket.on("disconnect", async () => {
@@ -438,24 +437,36 @@ io.on("connection", async (socket) => {
 
   app.get('/api/conversations/:userId', auth, async (req, res) => {
     try {
-      const userChat = await UserChat.findOne({ userId: req.params.userId });
-      if (!userChat) {
-        return res.json({ conversations: {} });
-      }
-      return res.json({ conversations: Object.fromEntries(userChat.conversations) });
+      const conversations = await UserChat.getUserConversations(req.params.userId);
+      return res.json({ conversations });
     } catch (error) {
       console.error('Error fetching conversations:', error);
       return res.status(500).json({ error: 'Failed to fetch conversations' });
     }
   });
   
-  app.get('/api/messages/:userId/:otherUserId', auth, async (req, res) => {
+  // Get messages for a specific room
+  app.get('/api/messages/:roomId', auth, async (req, res) => {
     try {
-      const messages = await UserChat.getConversation(req.params.userId, req.params.otherUserId);
-      return res.json({ messages: messages.sort((a, b) => b.timestamp - a.timestamp) });
+      const limit = parseInt(req.query.limit) || 50;
+      const skip = parseInt(req.query.skip) || 0;
+      
+      const messages = await UserChat.getRoomMessages(req.params.roomId, limit, skip);
+      return res.json({ messages });
     } catch (error) {
       console.error('Error fetching messages:', error);
       return res.status(500).json({ error: 'Failed to fetch messages' });
+    }
+  });
+  
+  // Mark messages as read
+  app.post('/api/messages/:roomId/read', auth, async (req, res) => {
+    try {
+      await UserChat.markMessagesAsRead(req.params.roomId, req.session.user.id);
+      return res.json({ success: true });
+    } catch (error) {
+      console.error('Error marking messages as read:', error);
+      return res.status(500).json({ error: 'Failed to mark messages as read' });
     }
   });
   app.get('/api/group-messages/:roomId', auth, async (req, res) => {
