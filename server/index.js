@@ -205,82 +205,19 @@ io.on("connection", async (socket) => {
       await zadd(roomKey, "" + sanitizedMessage.date, messageString);
   
       if (isPrivate) {
-        // Handle private messages
         const [user1, user2] = sanitizedMessage.roomId.split(':');
         const senderId = sanitizedMessage.from;
         const receiverId = senderId === user1 ? user2 : user1;
-  
+        
         const messageData = {
           content: sanitizedMessage.message,
           sender: senderId,
           receiver: receiverId,
           roomId: sanitizedMessage.roomId,
-          timestamp: sanitizedMessage.date,
-          read: false
+          timestamp: sanitizedMessage.date
         };
-  
-        // For sender
-        await UserChat.findOneAndUpdate(
-          { userId: senderId, 'conversations.with': receiverId },
-          {
-            $push: {
-              'conversations.$.messages': messageData
-            }
-          },
-          { new: true }
-        );
-  
-        // If sender doesn't have a conversation with receiver yet
-        await UserChat.findOneAndUpdate(
-          { userId: senderId, 'conversations.with': { $ne: receiverId } },
-          {
-            $push: {
-              conversations: {
-                with: receiverId,
-                messages: [messageData]
-              }
-            }
-          },
-          { upsert: true, new: true }
-        );
-  
-        // For receiver
-        await UserChat.findOneAndUpdate(
-          { userId: receiverId, 'conversations.with': senderId },
-          {
-            $push: {
-              'conversations.$.messages': messageData
-            }
-          },
-          { new: true }
-        );
-  
-        // If receiver doesn't have a conversation with sender yet
-        await UserChat.findOneAndUpdate(
-          { userId: receiverId, 'conversations.with': { $ne: senderId } },
-          {
-            $push: {
-              conversations: {
-                with: senderId,
-                messages: [messageData]
-              }
-            }
-          },
-          { upsert: true, new: true }
-        );
-  
-        // Handle private room creation if needed
-        if (!roomHasMessages) {
-          const roomMsg = {
-            id: sanitizedMessage.roomId,
-            names: [
-              await hmget(`user:${user1}`, "username"),
-              await hmget(`user:${user2}`, "username"),
-            ],
-          };
-          publish("show.room", roomMsg);
-          socket.broadcast.emit(`show.room`, roomMsg);
-        }
+        
+        await UserChat.addMessage(messageData);
       } else {
         // Group chat logic remains the same
         await GroupChat.findOneAndUpdate(
@@ -503,9 +440,9 @@ io.on("connection", async (socket) => {
     try {
       const userChat = await UserChat.findOne({ userId: req.params.userId });
       if (!userChat) {
-        return res.json({ conversations: [] });
+        return res.json({ conversations: {} });
       }
-      return res.json({ conversations: userChat.conversations });
+      return res.json({ conversations: Object.fromEntries(userChat.conversations) });
     } catch (error) {
       console.error('Error fetching conversations:', error);
       return res.status(500).json({ error: 'Failed to fetch conversations' });
@@ -514,22 +451,8 @@ io.on("connection", async (socket) => {
   
   app.get('/api/messages/:userId/:otherUserId', auth, async (req, res) => {
     try {
-      const userChat = await UserChat.findOne({ userId: req.params.userId });
-      if (!userChat) {
-        return res.json({ messages: [] });
-      }
-      
-      const conversation = userChat.conversations.find(
-        conv => conv.with === req.params.otherUserId
-      );
-      
-      if (!conversation) {
-        return res.json({ messages: [] });
-      }
-      
-      return res.json({ 
-        messages: conversation.messages.sort((a, b) => b.timestamp - a.timestamp) 
-      });
+      const messages = await UserChat.getConversation(req.params.userId, req.params.otherUserId);
+      return res.json({ messages: messages.sort((a, b) => b.timestamp - a.timestamp) });
     } catch (error) {
       console.error('Error fetching messages:', error);
       return res.status(500).json({ error: 'Failed to fetch messages' });
